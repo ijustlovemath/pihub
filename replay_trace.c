@@ -46,9 +46,8 @@ int add_entry(struct trace_entry **head, struct trace_entry **tail, const struct
 
 void cleanup_entries(struct trace_entry **head)
 {
-	struct trace_entry *tofree;
 	while(*head) {
-		tofree = *head;
+		struct trace_entry *tofree = *head;
 		*head = (*head)->next;
 		free(tofree);
 		if(*head == NULL) {
@@ -102,6 +101,8 @@ int init_gpio(const struct gpio_pin *pin)
 	fprintf(direction, "out");
 	fclose(direction);
 
+	(void) status;
+	
 	return 0;
 }
 
