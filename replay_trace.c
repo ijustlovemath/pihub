@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <time.h>
 #include <unistd.h>
 
 #define TRANSMITTER (13) // Pin (33) on the board, but linux actually abstracts that for us!
@@ -104,7 +105,7 @@ int init_gpio(const struct gpio_pin *pin)
 	return 0;
 }
 
-int write_gpio_bit(const struct gpio_pin *pin, int bit)
+int write_gpio_bit(const struct gpio_pin *pin, const int bit)
 {
 	/* it would be nice to abstract this all out, 
 	 * though doing it statically works well enough
@@ -119,14 +120,46 @@ int write_gpio_bit(const struct gpio_pin *pin, int bit)
 	if(value == NULL) {
 		die("unable to access value sysfs file");
 	}
-	int status = fprintf(value, "%d", bit);
+	int status = -1;
+	if(bit) {
+		status = fprintf(value, "1");
+	} else {
+		status = fprintf(value, "0");
+	}
 	fclose(value);
 	return status != 1; /* 1 byte written means it worked */
 }
 
-void replay(const struct trace_entry *head)
+void replay(const struct trace_entry *head, const struct gpio_pin *pin)
 {
+	while(head) {
+		double seconds = head->seconds;
+		if(seconds < 0.0) {
+			puts("malformatted sleep, bailing replay");
+			return;
+		}
+		/* We're dealing with ms scale sleeps,
+		 * clamp anything outside that
+		 * (aka the initial delay when recording)
+		 */
+		if(seconds > 1.0) {
+			seconds = 0.0;
+		}
+		struct timespec wait = {
+			.tv_sec = 0,
+			.tv_nsec = (long) 1000000000 * seconds
+		};
+		if(nanosleep(&wait, NULL)) {
+			puts("issue with nanosleep, interrupted");
+			return; 
+		}
+		if(write_gpio_bit(pin, head->bit)) {
+			puts("problem writing gpio bit, bailing replay");
+			return;
+		}
 
+		head = head->next;
+	}
 }
 
 int main(int argc, char * argv[])
@@ -163,7 +196,8 @@ int main(int argc, char * argv[])
 	const struct gpio_pin transmitter = { .pin_number = TRANSMITTER };
 	init_gpio(&transmitter);
 
-	replay(head);
+	/* Replay the trace file read in, waiting as needed */
+	replay(head, &transmitter);
 
 	/* Cleanup the linked list of entries */
 	cleanup_entries(&head);
