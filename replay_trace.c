@@ -3,8 +3,15 @@
 #include <errno.h>
 #include <time.h>
 #include <unistd.h>
+#include <inttypes.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 
-#define TRANSMITTER (13) // Pin (33) on the board, but linux actually abstracts that for us!
+#include "dma.h"
+
+#define TRANSMITTER (13) // GPIO13/Pin33 on the board, but linux actually abstracts that for us!
 
 struct trace_entry {
 	double seconds;
@@ -50,9 +57,6 @@ void cleanup_entries(struct trace_entry **head)
 		struct trace_entry *tofree = *head;
 		*head = (*head)->next;
 		free(tofree);
-		if(*head == NULL) {
-			break;
-		}
 	}
 }
 
@@ -65,7 +69,7 @@ void print_entries(const struct trace_entry *head)
 	}
 }
 
-int init_gpio(const struct gpio_pin *pin)
+int init_gpio_sysfs(const struct gpio_pin *pin)
 {
 	const char * export_path = "/sys/class/gpio/export";
 	char pin_path[100];
@@ -106,7 +110,7 @@ int init_gpio(const struct gpio_pin *pin)
 	return 0;
 }
 
-int write_gpio_bit(const struct gpio_pin *pin, const int bit)
+int write_gpio_sysfs(const struct gpio_pin *pin, const int bit)
 {
 	/* it would be nice to abstract this all out, 
 	 * though doing it statically works well enough
@@ -131,10 +135,64 @@ int write_gpio_bit(const struct gpio_pin *pin, const int bit)
 	return status != 1; /* 1 byte written means it worked */
 }
 
-void replay(const struct trace_entry *head, const struct gpio_pin *pin)
+// Return a pointer to a periphery subsystem register.
+static void *mmap_bcm_register(off_t register_offset) {
+  const off_t base = PERI_BASE;
+
+  int mem_fd;
+  if ((mem_fd = open("/dev/gpiomem", O_RDWR|O_SYNC) ) < 0) {
+    perror("can't open /dev/gpiomem");
+    fprintf(stderr, "You need to run this as root!\n");
+    return NULL;
+  }
+
+  uint32_t *result =
+    (uint32_t*) mmap(NULL,                  // Any adddress in our space will do
+                     PAGE_SIZE,
+                     PROT_READ|PROT_WRITE,  // Enable r/w on GPIO registers.
+                     MAP_SHARED,
+                     mem_fd,                // File to map
+                     base + register_offset // Offset to bcm register
+                     );
+  close(mem_fd);
+
+  if (result == MAP_FAILED) {
+    fprintf(stderr, "mmap error %p\n", (void*)result);
+    return NULL;
+  }
+  return result;
+}
+
+int write_gpio_dma(const struct gpio_pin *pin, const int bit)
 {
-	while(head) {
-		double seconds = head->seconds;
+	static volatile uint32_t *gpio_port = NULL;
+	if(gpio_port == NULL) {
+		gpio_port = mmap_bcm_register(GPIO_REGISTER_BASE);	
+	}
+
+	initialize_gpio_for_output(gpio_port, pin->pin_number);
+	static volatile uint32_t *set_reg = NULL;
+	if(set_reg == NULL) {
+		set_reg = gpio_port + (GPIO_SET_OFFSET / sizeof(uint32_t));
+	}
+
+	static volatile uint32_t *clr_reg = NULL;
+	if(clr_reg == NULL) {
+		clr_reg = gpio_port + (GPIO_CLR_OFFSET / sizeof(uint32_t));
+	}
+
+	if(bit) {
+		*set_reg = 1 << pin->pin_number;
+	} else {
+		*clr_reg = 1 << pin->pin_number;
+	}
+	return 0;
+}
+
+void replay(const struct trace_entry *trace, const struct gpio_pin *pin)
+{
+	while(trace) {
+		double seconds = trace->seconds;
 		if(seconds < 0.0) {
 			puts("malformatted sleep, bailing replay");
 			return;
@@ -154,12 +212,12 @@ void replay(const struct trace_entry *head, const struct gpio_pin *pin)
 			puts("issue with nanosleep, interrupted");
 			return; 
 		}
-		if(write_gpio_bit(pin, head->bit)) {
+		if(write_gpio_dma(pin, trace->bit)) {
 			puts("problem writing gpio bit, bailing replay");
 			return;
 		}
 
-		head = head->next;
+		trace = trace->next;
 	}
 }
 
@@ -195,7 +253,6 @@ int main(int argc, char * argv[])
 
 	/* Prepare the GPIO pin we want to use */
 	const struct gpio_pin transmitter = { .pin_number = TRANSMITTER };
-	init_gpio(&transmitter);
 
 	/* Replay the trace file read in, waiting as needed */
 	replay(head, &transmitter);
