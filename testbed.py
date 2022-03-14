@@ -5,7 +5,6 @@ import time
 receiver = 5
 GPIO.setmode(GPIO.BCM)
 GPIO.setup(receiver, GPIO.IN) # Receiver is on GPIO5/pin 29?
-GPIO.setup(13, GPIO.OUT) # Transmitter is on GPIO13/pin33
 
 # Setup
 prev_time = time.perf_counter()
